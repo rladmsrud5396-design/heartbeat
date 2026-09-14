@@ -1,0 +1,84 @@
+name: Heartbeat
+
+# 이 저장소는 코드가 없다. 하는 일은 하나뿐이다:
+#   "비공개 저장소의 NH Cycle 이 오늘 아직 안 돌았으면, 깨운다."
+#
+# 왜 따로 필요한가 —
+#   rladmsrud5396-design/us-analyst 의 예약(cron) 실행이 2026-09-12 06:47 KST 를
+#   마지막으로 3일째 한 번도 뜨지 않았다. 수동 실행은 100% 정상이다.
+#   즉 죽은 것은 스케줄 트리거 하나뿐이다. 같은 증상이 GitHub 커뮤니티에 반복
+#   보고돼 있고 공식 원인도 공식 수정도 없다. 고칠 수 없는 것에 목숨을 걸 수는 없다.
+#
+#   그래서 의존을 끊는다. 공개 저장소는 Actions 분이 무제한이라 촘촘히 깨워도 공짜다.
+#   비용이 드는 실제 작업은 저쪽에서만 돈다 — 이미 돌고 있으면 깨우지 않는다.
+
+on:
+  schedule:
+    # 12:41~21:21 UTC. 서머타임(ET=UTC-4)과 겨울(UTC-5) 양쪽을 덮는다.
+    # 분을 1·21·41 로 어긋나게 둔다 — 정각에 전 세계 크론이 몰리면 뒤로 밀린 뒤
+    # 재시도 없이 사라진다(공식 문서). 여기는 공짜니 촘촘히 깐다.
+    - cron: "41 12 * * 1-5"
+    - cron: "1,21,41 13-20 * * 1-5"
+    - cron: "1,21 21 * * 1-5"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.DISPATCH_PAT }}
+      TARGET: rladmsrud5396-design/us-analyst
+      WF: nh_cycle.yml
+
+    steps:
+      - name: 토큰이 있는지 먼저 본다
+        # 토큰이 없거나 만료되면 이 워크플로는 조용히 아무 일도 안 하는 상태가 된다.
+        # 그게 가장 위험하다 — 깨우고 있다고 믿는데 안 깨우는 상태. 그래서 실패시킨다.
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::DISPATCH_PAT 시크릿이 없다. 이 저장소는 아무것도 깨우지 못한다."
+            exit 1
+          fi
+
+      - name: 저쪽이 지금 돌고 있거나 오늘 이미 돌았는지 확인
+        id: chk
+        run: |
+          set -uo pipefail
+          RUNNING=$(gh run list -R "$TARGET" --workflow "$WF" --status in_progress --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          QUEUED=$(gh run list -R "$TARGET" --workflow "$WF" --status queued --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          TODAY=$(date -u +%Y-%m-%d)
+          DONE=$(gh run list -R "$TARGET" --workflow "$WF" --limit 30 --json createdAt --jq "[.[] | select(.createdAt | startswith(\"$TODAY\"))] | length" 2>/dev/null || echo 0)
+          echo "running=$RUNNING queued=$QUEUED today=$DONE"
+          if [ "$RUNNING" != "0" ] || [ "$QUEUED" != "0" ] || [ "$DONE" != "0" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "::notice::오늘 회차가 이미 있다(진행 $RUNNING · 대기 $QUEUED · 오늘 $DONE). 깨우지 않는다."
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 깨운다
+        if: steps.chk.outputs.skip == '0'
+        run: |
+          set -euo pipefail
+          gh workflow run "$WF" -R "$TARGET" --ref main
+          echo "::notice::NH Cycle 을 깨웠다."
+
+      - name: 진짜로 떴는지 확인한다
+        # '보냈다'와 '떴다'는 다르다. dispatch 는 202 를 주고도 회차를 안 만들 수 있다.
+        if: steps.chk.outputs.skip == '0'
+        run: |
+          set -uo pipefail
+          for i in 1 2 3 4 5 6; do
+            sleep 10
+            N=$(gh run list -R "$TARGET" --workflow "$WF" --limit 5 --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+            if [ "$N" != "0" ]; then echo "::notice::확인됨 — 회차가 떴다."; exit 0; fi
+          done
+          echo "::error::dispatch 를 보냈는데 60초 안에 회차가 뜨지 않았다."
+          exit 1
