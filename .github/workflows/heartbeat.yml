@@ -74,7 +74,7 @@ jobs:
             WF="$IN"
           else
             H=$(date -u +%-H)
-            if [ "$H" -ge 22 ] || [ "$H" -le 1 ] || [ "$H" -eq 11 ]; then
+            if [ "$H" -ge 22 ] || [ "$H" -le 11 ]; then
               WF="nh_stops.yml"
             else
               WF="nh_cycle.yml"
